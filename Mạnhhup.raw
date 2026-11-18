@@ -1,0 +1,820 @@
+-- SPIRIT HUB | Universal | UNC | Mobile + Desktop
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local LocalPlayer = Players.LocalPlayer
+
+local CONFIG = {
+	Title = "SPIRIT HUB",
+	AcceptAnyKey = true,
+	ValidKeys = {"SPIRIT"},
+	MenuKey = Enum.KeyCode.RightShift,
+	IconImage = "",
+	IconEmoji = "🐉",
+	FovDefault = 120,
+	FovMin = 10,
+	FovMax = 600,
+	BoneThickness = 1.5,
+	BoneCount = 14,
+}
+
+local State = {
+	Aimbot = false,
+	ESP = false,
+	TeamCheck = false,
+	VisibleCheck = false,
+	Fov = CONFIG.FovDefault,
+}
+
+local Connections = {}
+local RainbowTargets = {}
+local ScaleObjects = {}
+local MenuReady = false
+local HasDrawing = Drawing ~= nil
+
+local function track(conn)
+	table.insert(Connections, conn)
+	return conn
+end
+
+local function getRainbow()
+	return Color3.fromHSV((tick() % 4) / 4, 1, 1)
+end
+
+local function rainbowBind(obj, prop)
+	table.insert(RainbowTargets, {obj, prop})
+end
+
+local function addCorner(parent, radius)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, radius)
+	c.Parent = parent
+	return c
+end
+
+local function addStroke(parent, thickness)
+	local s = Instance.new("UIStroke")
+	s.Thickness = thickness
+	s.Parent = parent
+	rainbowBind(s, "Color")
+	return s
+end
+
+local function addScale(parent)
+	local sc = Instance.new("UIScale")
+	sc.Parent = parent
+	table.insert(ScaleObjects, sc)
+	return sc
+end
+
+local function newLabel(parent, text, size, pos, textSize, font)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	l.Size = size
+	l.Position = pos
+	l.Text = text
+	l.TextSize = textSize
+	l.Font = font
+	l.TextColor3 = Color3.new(1, 1, 1)
+	l.Parent = parent
+	return l
+end
+
+local function setProps(obj, props)
+	if not obj then return end
+	for k, v in pairs(props) do
+		obj[k] = v
+	end
+end
+
+local function makeDraggable(handle, target)
+	local status = {Moved = false}
+	local dragging, dragStart, startPos = false, nil, nil
+	handle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			status.Moved = false
+			dragStart = input.Position
+			startPos = target.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+	track(UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			if delta.Magnitude > 6 then status.Moved = true end
+			local sc = target:FindFirstChildOfClass("UIScale")
+			local s = sc and sc.Scale or 1
+			delta = delta / s
+			target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		end
+	end))
+	return status
+end
+
+-- =================================================================
+-- SCREEN GUI
+-- =================================================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "SpiritHub"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+local guiParent = nil
+if gethui then
+	local ok, h = pcall(gethui)
+	if ok and h then guiParent = h end
+end
+ScreenGui.Parent = guiParent or LocalPlayer:WaitForChild("PlayerGui")
+
+local function refreshScale()
+	local cam = workspace.CurrentCamera
+	local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+	local s = math.min(vp.X * 0.92 / 300, vp.Y * 0.8 / 400, 1.1)
+	s = math.clamp(s, 0.5, 1.1)
+	for _, sc in ipairs(ScaleObjects) do
+		if sc.Parent then sc.Scale = s end
+	end
+end
+
+local function bindViewport()
+	local cam = workspace.CurrentCamera
+	if cam then
+		track(cam:GetPropertyChangedSignal("ViewportSize"):Connect(refreshScale))
+	end
+	refreshScale()
+end
+track(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindViewport))
+bindViewport()
+
+-- =================================================================
+-- FOV CIRCLE
+-- =================================================================
+local FovCircle = Instance.new("Frame")
+FovCircle.Name = "FovCircle"
+FovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+FovCircle.Position = UDim2.new(0.5, 0, 0.5, 0)
+FovCircle.Size = UDim2.new(0, State.Fov * 2, 0, State.Fov * 2)
+FovCircle.BackgroundTransparency = 1
+FovCircle.BorderSizePixel = 0
+FovCircle.Visible = false
+FovCircle.Parent = ScreenGui
+local fovCorner = Instance.new("UICorner")
+fovCorner.CornerRadius = UDim.new(1, 0)
+fovCorner.Parent = FovCircle
+addStroke(FovCircle, 1)
+
+-- =================================================================
+-- KEY PANEL
+-- =================================================================
+local function makePanel(name, size, anchor, pos)
+	local f = Instance.new("Frame")
+	f.Name = name
+	f.Size = size
+	f.AnchorPoint = anchor
+	f.Position = pos
+	f.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
+	f.BackgroundTransparency = 0.05
+	f.BorderSizePixel = 0
+	f.Active = true
+	f.Parent = ScreenGui
+	addCorner(f, 14)
+	addStroke(f, 2)
+	addScale(f)
+	return f
+end
+
+local KeyFrame = makePanel("KeyFrame", UDim2.new(0, 320, 0, 190), Vector2.new(0.5, 0.5), UDim2.new(0.5, 0, 0.45, 0))
+KeyFrame.Visible = true
+
+local KeyTitle = newLabel(KeyFrame, CONFIG.Title .. " - KEY", UDim2.new(1, 0, 0, 40), UDim2.new(0, 0, 0, 8), 15, Enum.Font.GothamBlack)
+rainbowBind(KeyTitle, "TextColor3")
+makeDraggable(KeyTitle, KeyFrame)
+
+local KeyBox = Instance.new("TextBox")
+KeyBox.Size = UDim2.new(0.85, 0, 0, 40)
+KeyBox.Position = UDim2.new(0.075, 0, 0, 60)
+KeyBox.BackgroundColor3 = Color3.fromRGB(24, 24, 32)
+KeyBox.BorderSizePixel = 0
+KeyBox.ClearTextOnFocus = false
+KeyBox.Text = ""
+KeyBox.PlaceholderText = "Enter key..."
+KeyBox.PlaceholderColor3 = Color3.fromRGB(150, 150, 160)
+KeyBox.TextColor3 = Color3.new(1, 1, 1)
+KeyBox.TextSize = 14
+KeyBox.Font = Enum.Font.GothamMedium
+KeyBox.Parent = KeyFrame
+addCorner(KeyBox, 10)
+addStroke(KeyBox, 1.5)
+
+local SubmitBtn = Instance.new("TextButton")
+SubmitBtn.Size = UDim2.new(0.85, 0, 0, 40)
+SubmitBtn.Position = UDim2.new(0.075, 0, 0, 112)
+SubmitBtn.BackgroundColor3 = Color3.fromRGB(24, 24, 32)
+SubmitBtn.BorderSizePixel = 0
+SubmitBtn.AutoButtonColor = false
+SubmitBtn.Text = "SUBMIT KEY"
+SubmitBtn.TextColor3 = Color3.new(1, 1, 1)
+SubmitBtn.TextSize = 13
+SubmitBtn.Font = Enum.Font.GothamBold
+SubmitBtn.Parent = KeyFrame
+addCorner(SubmitBtn, 10)
+addStroke(SubmitBtn, 1.5)
+
+local StatusLabel = newLabel(KeyFrame, "", UDim2.new(1, 0, 0, 20), UDim2.new(0, 0, 0, 162), 12, Enum.Font.Gotham)
+
+-- =================================================================
+-- MAIN PANEL
+-- =================================================================
+local MainFrame = makePanel("MainFrame", UDim2.new(0, 300, 0, 360), Vector2.new(0.5, 0), UDim2.new(0.5, 0, 0.1, 0))
+MainFrame.Visible = false
+
+local TitleBar = Instance.new("Frame")
+TitleBar.Size = UDim2.new(1, 0, 0, 44)
+TitleBar.BackgroundTransparency = 1
+TitleBar.Active = true
+TitleBar.Parent = MainFrame
+makeDraggable(TitleBar, MainFrame)
+
+local Title = newLabel(TitleBar, CONFIG.Title, UDim2.new(1, 0, 0, 26), UDim2.new(0, 0, 0, 4), 15, Enum.Font.GothamBlack)
+rainbowBind(Title, "TextColor3")
+
+local Subtitle = newLabel(TitleBar, "RightShift hoặc icon rồng để mở menu", UDim2.new(1, 0, 0, 14), UDim2.new(0, 0, 0, 28), 10, Enum.Font.Gotham)
+Subtitle.TextColor3 = Color3.fromRGB(170, 170, 180)
+
+local Body = Instance.new("ScrollingFrame")
+Body.Name = "Body"
+Body.Size = UDim2.new(1, -16, 1, -58)
+Body.Position = UDim2.new(0, 8, 0, 50)
+Body.BackgroundTransparency = 1
+Body.BorderSizePixel = 0
+Body.ScrollBarThickness = 3
+Body.ScrollBarImageColor3 = Color3.new(1, 1, 1)
+rainbowBind(Body, "ScrollBarImageColor3")
+Body.CanvasSize = UDim2.new(0, 0, 0, 0)
+Body.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Body.ScrollingDirection = Enum.ScrollingDirection.Y
+Body.Parent = MainFrame
+
+local BodyLayout = Instance.new("UIListLayout")
+BodyLayout.Padding = UDim.new(0, 8)
+BodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+BodyLayout.Parent = Body
+
+local function makeCard(order, height)
+	local card = Instance.new("Frame")
+	card.Size = UDim2.new(1, -6, 0, height)
+	card.BackgroundColor3 = Color3.fromRGB(24, 24, 32)
+	card.BorderSizePixel = 0
+	card.LayoutOrder = order
+	card.Parent = Body
+	addCorner(card, 10)
+	addStroke(card, 1.2)
+	return card
+end
+
+local function createToggle(text, order, onChange)
+	local card = makeCard(order, 44)
+	local lbl = newLabel(card, text, UDim2.new(1, -74, 1, 0), UDim2.new(0, 12, 0, 0), 13, Enum.Font.GothamMedium)
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+
+	local pill = Instance.new("TextButton")
+	pill.Size = UDim2.new(0, 44, 0, 24)
+	pill.Position = UDim2.new(1, -56, 0.5, -12)
+	pill.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+	pill.BorderSizePixel = 0
+	pill.Text = ""
+	pill.AutoButtonColor = false
+	pill.Parent = card
+	addCorner(pill, 12)
+
+	local knob = Instance.new("Frame")
+	knob.Size = UDim2.new(0, 18, 0, 18)
+	knob.Position = UDim2.new(0, 3, 0.5, -9)
+	knob.BackgroundColor3 = Color3.new(1, 1, 1)
+	knob.BorderSizePixel = 0
+	knob.Parent = pill
+	addCorner(knob, 9)
+
+	local state = false
+	local info = TweenInfo.new(0.2)
+	local function render(instant)
+		local goalPos = state and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9)
+		local goalColor = state and Color3.fromRGB(0, 255, 120) or Color3.fromRGB(60, 60, 70)
+		if instant then
+			knob.Position = goalPos
+			pill.BackgroundColor3 = goalColor
+		else
+			TweenService:Create(knob, info, {Position = goalPos}):Play()
+			TweenService:Create(pill, info, {BackgroundColor3 = goalColor}):Play()
+		end
+	end
+
+	pill.MouseButton1Click:Connect(function()
+		state = not state
+		render(false)
+		onChange(state)
+	end)
+	render(true)
+	return card
+end
+
+local function createSlider(title, order, minV, maxV, default, onChange)
+	local card = makeCard(order, 58)
+	local titleLbl = newLabel(card, title, UDim2.new(0.7, 0, 0, 20), UDim2.new(0, 12, 0, 6), 12, Enum.Font.GothamMedium)
+	titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+	local valueLbl = newLabel(card, tostring(default), UDim2.new(0, 60, 0, 20), UDim2.new(1, -72, 0, 6), 12, Enum.Font.GothamBold)
+	valueLbl.TextXAlignment = Enum.TextXAlignment.Right
+
+	local hit = Instance.new("TextButton")
+	hit.Size = UDim2.new(1, -24, 0, 24)
+	hit.Position = UDim2.new(0, 12, 0, 30)
+	hit.BackgroundTransparency = 1
+	hit.Text = ""
+	hit.AutoButtonColor = false
+	hit.Parent = card
+
+	local trackFrame = Instance.new("Frame")
+	trackFrame.Size = UDim2.new(1, 0, 0, 6)
+	trackFrame.Position = UDim2.new(0, 0, 0.5, -3)
+	trackFrame.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+	trackFrame.BorderSizePixel = 0
+	trackFrame.Parent = hit
+	addCorner(trackFrame, 3)
+
+	local ratio0 = (default - minV) / (maxV - minV)
+	local fill = Instance.new("Frame")
+	fill.Size = UDim2.new(ratio0, 0, 1, 0)
+	fill.BorderSizePixel = 0
+	fill.BackgroundColor3 = getRainbow()
+	fill.Parent = trackFrame
+	addCorner(fill, 3)
+	rainbowBind(fill, "BackgroundColor3")
+
+	local knob = Instance.new("Frame")
+	knob.AnchorPoint = Vector2.new(0.5, 0.5)
+	knob.Size = UDim2.new(0, 14, 0, 14)
+	knob.Position = UDim2.new(ratio0, 0, 0.5, 0)
+	knob.BackgroundColor3 = Color3.new(1, 1, 1)
+	knob.BorderSizePixel = 0
+	knob.Parent = trackFrame
+	addCorner(knob, 7)
+
+	local dragging = false
+	local function applyX(x)
+		local rel = math.clamp((x - trackFrame.AbsolutePosition.X) / math.max(trackFrame.AbsoluteSize.X, 1), 0, 1)
+		local value = math.floor(minV + (maxV - minV) * rel + 0.5)
+		fill.Size = UDim2.new(rel, 0, 1, 0)
+		knob.Position = UDim2.new(rel, 0, 0.5, 0)
+		valueLbl.Text = tostring(value)
+		onChange(value)
+	end
+
+	hit.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			applyX(input.Position.X)
+		end
+	end)
+	track(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end))
+	track(UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			applyX(input.Position.X)
+		end
+	end))
+	return card
+end
+
+-- =================================================================
+-- DRAGON ICON + KEYBIND
+-- =================================================================
+local ToggleButton = Instance.new("TextButton")
+ToggleButton.Name = "DragonToggle"
+ToggleButton.Size = UDim2.new(0, 56, 0, 56)
+ToggleButton.Position = UDim2.new(0, 14, 0.5, -28)
+ToggleButton.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
+ToggleButton.BorderSizePixel = 0
+ToggleButton.AutoButtonColor = false
+ToggleButton.Text = ""
+ToggleButton.ZIndex = 10
+ToggleButton.Visible = false
+ToggleButton.Active = true
+ToggleButton.Parent = ScreenGui
+addCorner(ToggleButton, 28)
+addStroke(ToggleButton, 2.5)
+addScale(ToggleButton)
+
+if CONFIG.IconImage ~= "" then
+	local icon = Instance.new("ImageLabel")
+	icon.Size = UDim2.new(0.8, 0, 0.8, 0)
+	icon.Position = UDim2.new(0.1, 0, 0.1, 0)
+	icon.BackgroundTransparency = 1
+	icon.Image = CONFIG.IconImage
+	icon.ScaleType = Enum.ScaleType.Fit
+	icon.ZIndex = 11
+	icon.Parent = ToggleButton
+else
+	local emoji = newLabel(ToggleButton, CONFIG.IconEmoji, UDim2.new(1, 0, 1, 0), UDim2.new(0, 0, 0, 0), 30, Enum.Font.GothamBold)
+	emoji.ZIndex = 11
+end
+
+local toggleStatus = makeDraggable(ToggleButton, ToggleButton)
+
+ToggleButton.MouseButton1Click:Connect(function()
+	if MenuReady and not toggleStatus.Moved then
+		MainFrame.Visible = not MainFrame.Visible
+	end
+end)
+
+track(UserInputService.InputBegan:Connect(function(input, gp)
+	if gp then return end
+	if input.KeyCode == CONFIG.MenuKey and MenuReady then
+		MainFrame.Visible = not MainFrame.Visible
+	end
+end))
+
+-- =================================================================
+-- ESP
+-- =================================================================
+local ESPCache = {}
+
+local BonesR15 = {
+	{"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+	{"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
+	{"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+	{"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
+	{"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"},
+}
+
+local BonesR6 = {
+	{"Head", "Torso"}, {"Torso", "Left Arm"}, {"Torso", "Right Arm"},
+	{"Torso", "Left Leg"}, {"Torso", "Right Leg"},
+}
+
+local function newDrawing(class, props)
+	if not HasDrawing then return nil end
+	local ok, obj = pcall(Drawing.new, class)
+	if not ok or not obj then return nil end
+	for k, v in pairs(props) do
+		obj[k] = v
+	end
+	return obj
+end
+
+local function getESP(player)
+	local cache = ESPCache[player]
+	if cache then return cache end
+	local black = Color3.new(0, 0, 0)
+	cache = {
+		Outline = newDrawing("Square", {Thickness = 3, Filled = false, Color = black, Transparency = 1, Visible = false, ZIndex = 1}),
+		Box = newDrawing("Square", {Thickness = 1.5, Filled = false, Transparency = 1, Visible = false, ZIndex = 2}),
+		Name = newDrawing("Text", {Size = 14, Center = true, Outline = true, OutlineColor = black, Transparency = 1, Visible = false, ZIndex = 3}),
+		Distance = newDrawing("Text", {Size = 13, Center = true, Outline = true, OutlineColor = black, Transparency = 1, Visible = false, ZIndex = 3}),
+		Tracer = newDrawing("Line", {Thickness = 1.3, Transparency = 1, Visible = false, ZIndex = 2}),
+		HpBg = newDrawing("Square", {Filled = true, Color = black, Transparency = 0.5, Visible = false, ZIndex = 1}),
+		HpFill = newDrawing("Square", {Filled = true, Transparency = 1, Visible = false, ZIndex = 2}),
+		Bones = {},
+	}
+	for i = 1, CONFIG.BoneCount do
+		cache.Bones[i] = newDrawing("Line", {Thickness = CONFIG.BoneThickness, Transparency = 1, Visible = false, ZIndex = 2})
+	end
+	ESPCache[player] = cache
+	return cache
+end
+
+local function destroyESP(player)
+	local cache = ESPCache[player]
+	if not cache then return end
+	for key, obj in pairs(cache) do
+		if key == "Bones" then
+			for _, line in ipairs(obj) do
+				pcall(function() line:Remove() end)
+			end
+		elseif obj then
+			pcall(function() obj:Remove() end)
+		end
+	end
+	ESPCache[player] = nil
+end
+
+local function hideESP(cache)
+	for key, obj in pairs(cache) do
+		if key == "Bones" then
+			for _, line in ipairs(obj) do
+				if line then line.Visible = false end
+			end
+		elseif obj then
+			obj.Visible = false
+		end
+	end
+end
+
+local function updateSkeleton(char, cache, color, cam)
+	local list = char:FindFirstChild("UpperTorso") and BonesR15 or BonesR6
+	for i = 1, CONFIG.BoneCount do
+		local line = cache.Bones[i]
+		local pair = list[i]
+		local shown = false
+		if line and pair then
+			local a = char:FindFirstChild(pair[1])
+			local b = char:FindFirstChild(pair[2])
+			if a and b and a:IsA("BasePart") and b:IsA("BasePart") then
+				local pa, va = cam:WorldToViewportPoint(a.Position)
+				local pb, vb = cam:WorldToViewportPoint(b.Position)
+				if va and vb then
+					line.From = Vector2.new(pa.X, pa.Y)
+					line.To = Vector2.new(pb.X, pb.Y)
+					line.Color = color
+					line.Visible = true
+					shown = true
+				end
+			end
+		end
+		if line and not shown then line.Visible = false end
+	end
+end
+
+local function isEnemy(player)
+	if not State.TeamCheck then return true end
+	if LocalPlayer.Team and player.Team == LocalPlayer.Team then return false end
+	return true
+end
+
+local function isVisible(cam, part)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local ignore = {part.Parent}
+	if LocalPlayer.Character then
+		table.insert(ignore, LocalPlayer.Character)
+	end
+	params.FilterDescendantsInstances = ignore
+	local origin = cam.CFrame.Position
+	local hit = workspace:Raycast(origin, part.Position - origin, params)
+	return hit == nil
+end
+
+local function updateESP(cam, color)
+	if not State.ESP then
+		for _, cache in pairs(ESPCache) do
+			hideESP(cache)
+		end
+		return
+	end
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player == LocalPlayer then continue end
+		local char = player.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local valid = char and hum and root and hum.Health > 0 and isEnemy(player)
+		local cache = ESPCache[player]
+
+		if not valid then
+			if cache then hideESP(cache) end
+			continue
+		end
+
+		cache = getESP(player)
+		local cf, size = char:GetBoundingBox()
+		local half = size / 2
+		local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+		local inFront = false
+
+		for _, sx in ipairs({-1, 1}) do
+			for _, sy in ipairs({-1, 1}) do
+				for _, sz in ipairs({-1, 1}) do
+					local corner = cf:PointToWorldSpace(Vector3.new(sx * half.X, sy * half.Y, sz * half.Z))
+					local p = cam:WorldToViewportPoint(corner)
+					if p.Z > 0 then
+						inFront = true
+						minX = math.min(minX, p.X)
+						maxX = math.max(maxX, p.X)
+						minY = math.min(minY, p.Y)
+						maxY = math.max(maxY, p.Y)
+					end
+				end
+			end
+		end
+
+		if not inFront then
+			hideESP(cache)
+			continue
+		end
+
+		local boxW, boxH = maxX - minX, maxY - minY
+		local centerX = minX + boxW / 2
+		local dist = (root.Position - cam.CFrame.Position).Magnitude
+		local frac = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+
+		setProps(cache.Outline, {Position = Vector2.new(minX, minY), Size = Vector2.new(boxW, boxH), Visible = true})
+		setProps(cache.Box, {Position = Vector2.new(minX, minY), Size = Vector2.new(boxW, boxH), Color = color, Visible = true})
+		setProps(cache.Name, {
+			Text = string.format("%s [%d HP]", player.Name, math.floor(hum.Health)),
+			Position = Vector2.new(centerX, minY - 16),
+			Color = color,
+			Visible = true,
+		})
+		setProps(cache.Distance, {
+			Text = string.format("%d studs", math.floor(dist)),
+			Position = Vector2.new(centerX, maxY + 2),
+			Color = Color3.new(1, 1, 1),
+			Visible = true,
+		})
+		setProps(cache.HpBg, {Position = Vector2.new(minX - 6, minY), Size = Vector2.new(3, boxH), Visible = true})
+		setProps(cache.HpFill, {
+			Position = Vector2.new(minX - 6, minY + boxH * (1 - frac)),
+			Size = Vector2.new(3, boxH * frac),
+			Color = Color3.fromRGB(255, 0, 0):Lerp(Color3.fromRGB(0, 255, 0), frac),
+			Visible = true,
+		})
+		setProps(cache.Tracer, {
+			From = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y),
+			To = Vector2.new(centerX, maxY),
+			Color = color,
+			Visible = true,
+		})
+		updateSkeleton(char, cache, color, cam)
+	end
+end
+
+-- =================================================================
+-- AIMBOT
+-- =================================================================
+local function getAimTarget(cam)
+	local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+	local best, bestDist = nil, State.Fov
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer and isEnemy(player) then
+			local char = player.Character
+			local head = char and char:FindFirstChild("Head")
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if head and hum and hum.Health > 0 then
+				local p, onScreen = cam:WorldToViewportPoint(head.Position)
+				if onScreen then
+					local d = (Vector2.new(p.X, p.Y) - center).Magnitude
+					if d <= bestDist and (not State.VisibleCheck or isVisible(cam, head)) then
+						best = head
+						bestDist = d
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function aimStep()
+	if not State.Aimbot then return end
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	local head = getAimTarget(cam)
+	if not head then return end
+	cam.CFrame = CFrame.lookAt(cam.CFrame.Position, head.Position)
+end
+
+RunService:BindToRenderStep("SpiritAim", Enum.RenderPriority.Camera.Value + 1, aimStep)
+
+-- =================================================================
+-- MAIN LOOP
+-- =================================================================
+track(RunService.RenderStepped:Connect(function()
+	local color = getRainbow()
+	for _, t in ipairs(RainbowTargets) do
+		t[1][t[2]] = color
+	end
+	local cam = workspace.CurrentCamera
+	if cam then
+		updateESP(cam, color)
+	end
+end))
+
+track(Players.PlayerRemoving:Connect(destroyESP))
+
+-- =================================================================
+-- MAIN PANEL CONTROLS
+-- =================================================================
+createToggle("Aimbot Headlock", 1, function(v)
+	State.Aimbot = v
+	FovCircle.Visible = v
+end)
+
+createToggle("Visible Check", 2, function(v)
+	State.VisibleCheck = v
+end)
+
+createToggle("Team Check", 3, function(v)
+	State.TeamCheck = v
+end)
+
+createToggle("ESP Box / Info / Skeleton", 4, function(v)
+	State.ESP = v
+end)
+
+createSlider("FOV Radius", 5, CONFIG.FovMin, CONFIG.FovMax, CONFIG.FovDefault, function(v)
+	State.Fov = v
+	FovCircle.Size = UDim2.new(0, v * 2, 0, v * 2)
+end)
+
+-- =================================================================
+-- INTRO + KEY SUBMIT
+-- =================================================================
+local function playIntro()
+	local label = newLabel(ScreenGui, "", UDim2.new(0, 600, 0, 80), UDim2.new(0.5, 0, 0.4, 0), 40, Enum.Font.GothamBlack)
+	label.AnchorPoint = Vector2.new(0.5, 0.5)
+	local textStroke = Instance.new("UIStroke")
+	textStroke.Color = Color3.new(0, 0, 0)
+	textStroke.Thickness = 3
+	textStroke.Parent = label
+	addScale(label)
+	refreshScale()
+
+	task.spawn(function()
+		local text = CONFIG.Title
+		for i = 1, #text do
+			label.Text = string.sub(text, 1, i)
+			task.wait(0.07)
+		end
+		task.wait(0.8)
+		local info = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		local fadeText = TweenService:Create(label, info, {TextTransparency = 1})
+		TweenService:Create(textStroke, info, {Transparency = 1}):Play()
+		fadeText:Play()
+		fadeText.Completed:Wait()
+		label:Destroy()
+		MainFrame.Visible = true
+		ToggleButton.Visible = true
+		MenuReady = true
+	end)
+end
+
+local keyAccepted = false
+local function trimKey(s)
+	local t = string.gsub(s, "^%s+", "")
+	t = string.gsub(t, "%s+$", "")
+	return string.upper(t)
+end
+
+local function isValidKey(input)
+	local clean = trimKey(input)
+	if clean == "" then return false end
+	if CONFIG.AcceptAnyKey then return true end
+	for _, k in ipairs(CONFIG.ValidKeys) do
+		if clean == string.upper(k) then return true end
+	end
+	return false
+end
+
+SubmitBtn.MouseButton1Click:Connect(function()
+	if keyAccepted then return end
+	if isValidKey(KeyBox.Text) then
+		keyAccepted = true
+		StatusLabel.TextColor3 = Color3.fromRGB(0, 255, 120)
+		StatusLabel.Text = "Key accepted. Loading..."
+		task.wait(0.4)
+		KeyFrame:Destroy()
+		playIntro()
+	else
+		StatusLabel.TextColor3 = Color3.fromRGB(255, 70, 70)
+		StatusLabel.Text = "Vui lòng nhập key."
+	end
+end)
+
+-- =================================================================
+-- UNLOAD
+-- =================================================================
+local function unload()
+	State.Aimbot = false
+	State.ESP = false
+	pcall(function() RunService:UnbindFromRenderStep("SpiritAim") end)
+	for _, c in ipairs(Connections) do
+		c:Disconnect()
+	end
+	table.clear(Connections)
+	for player in pairs(ESPCache) do
+		destroyESP(player)
+	end
+	table.clear(RainbowTargets)
+	ScreenGui:Destroy()
+end
+
+local UnloadBtn = Instance.new("TextButton")
+UnloadBtn.Size = UDim2.new(1, -6, 0, 36)
+UnloadBtn.BackgroundColor3 = Color3.fromRGB(50, 20, 24)
+UnloadBtn.BorderSizePixel = 0
+UnloadBtn.AutoButtonColor = false
+UnloadBtn.Text = "UNLOAD SPIRIT"
+UnloadBtn.TextColor3 = Color3.fromRGB(255, 120, 120)
+UnloadBtn.TextSize = 12
+UnloadBtn.Font = Enum.Font.GothamBold
+UnloadBtn.LayoutOrder = 6
+UnloadBtn.Parent = Body
+addCorner(UnloadBtn, 10)
+UnloadBtn.MouseButton1Click:Connect(unload)
